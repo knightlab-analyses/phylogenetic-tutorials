@@ -1,0 +1,6 @@
+pip
+notebook
+jupyter
+r
+r-maps
+r-irkernel
