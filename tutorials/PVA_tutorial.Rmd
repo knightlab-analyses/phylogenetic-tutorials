@@ -1,0 +1,255 @@
+---
+title: "PVA tutorial"
+author: "Alex Washburne"
+date: "April 18, 2017"
+output: html_document
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r Initializing}
+library(ape)
+library(phytools)
+library(phylofactor) #devtools::install_github('reptalex/phylofactor')
+library(philr)       #devtools::install_github('jsilve24/philr')
+
+set.seed(1)
+nspecies=10
+tree <- rtree(nspecies)  #random, 10-species tree used for demonstration
+```
+
+# Phylogenetic Variables Analysis
+
+Phylogenies can motivate the analysis of alternative variables and the discovery of new coordinates which both explain patterns in the data and carry a phylogenetic interpretation.
+
+Two methods have been recently developed with the aim of analyzing microbiome datasets via phylogenetic variables: PhILR and phylofactorization. These methods provide an illustration into the nuances of phylogenetic variables analysis. Both methods assume microbiome data are compositional and construct variables - isometric log-ratio (ILR) transforms - which contrast abundances between two groups, but the methods differ in which pairs of groups are contrasted. PhILR contrasts sister clades, whereas phylofactorization contrasts groups separated by edges.
+
+Due to the novelty of these methods relative to the phylogenetic comparative methods used above, we will provide a more comprehensive tutorial to illustrate precisely what these methods are doing and what phylogenetic variables are being constructed. We leave for future work the sensitivity analysis to horizontal gene transfer, and the suitability of each for identifying particular evolutionary or ecological processes.
+
+### Simulated dataset
+
+To illustrate phylofactorization and PhILR, we consider OTU abundances driven by disturbance frequency, where high disturbance frequency favors organisms with high RNA copy number and low disturbance frequency favors organisms with low RNA copy number. Such a mechanism has been hypothesized in microbial communities as an R-K tradeoff (Klappenbach et al., 2000; Nemergut et al. 2015): high disturbance frequencies may favor fast-growing species and high 16S gene copy numbers may allow species to grow faster; low disturbance frequencies may favor more efficient K-selected microbes with lower 16S gene copy number.
+
+Disturbance frequency is drawn as an exponential random variable and 16S copy number will be the values simulated above when illustrating how to simulate discrete character traits.
+
+``` {r Disturbance frequency and RNA copy number, results='hide'}
+n <- 20 # sample size
+disturbance_frequency <- rexp(n) %>% sort %>% log
+
+Q <- diag(9) %>% cbind(rep(0,9),.) %>% rbind(.,rep(0,10)) 
+Q <- Q+t(Q)-diag(10)
+RNAcopyNumber <- sim.history(tree,Q,anc = '3')
+```
+
+This produces a list containing, among other things, the states of each of our species at the end of the simulated evolution.
+
+```{r RNA copy number states}
+RNAcopyNumber$states
+```
+Which can be visualized using `plotSimmap`
+```{r plotSimmap}
+plotSimmap(RNAcopyNumber)
+```
+
+We'll model organisms' sequence-counts by drawing negative binomial count data. An organism's mean relative abundances will be determined by a combination of RNA copy number and disturbance frequency. The following function computes abundances as a function of disturbance frequency and RNA gene copy number,
+
+```{r abundances model}
+abundances <- function(dst,RNAcopy){
+  m <- length(RNAcopy)
+  muTot <- 1e4   ##a mean of 10,000 sequence counts per sample.
+  logmu <- 3*dst*log(RNAcopy) #model to yield linear changes in log-ratios
+  muRel <- exp(logmu)/sum(exp(logmu))  #mean relative abundances 
+  mu=muRel*muTot
+  size=1
+  N <- rnbinom(m,size,mu=mu)
+  return(N)
+}
+```
+
+which we can use to generate our OTU table. The OTUTable needs two tweaks: (1) we need to replace 0's with a pseudocount in order to take log-ratios (we choose 0.65, a historical convention that keeps zeros less than 1 and has the consequence that the ratio between our pseudocounts for 0 and 1 is less than the ratio between 1 and 2), and we need to name the rows of our OTUTable after the species in our tree.
+```{r making OTUTable}
+OTUTable <- sapply(as.list(disturbance_frequency),FUN=function(dst,c) abundances(dst,c),c=as.numeric(RNAcopyNumber$states)) %>%
+                  matrix(.,ncol=n,byrow=F)
+
+OTUTable[OTUTable==0]=0.65 #Both PhILR and Phylofactor require removing zeros to take logs and ratios.
+
+rownames(OTUTable) <- tree$tip.label #label OTUs on OTUTable
+```
+
+The phylogenetic structure of our dataset that can be visualized with `phylo.heatmap` from the package `phytools`:
+```{r visualizing OTUTable}
+clr <- function(y) log(y)-mean(log(y))
+Y.clr <- apply(OTUTable,MARGIN=2,FUN=clr)
+colnames(Y.clr) <- disturbance_frequency
+phylo.heatmap(tree,Y.clr)
+tiplabels(RNAcopyNumber$states)
+```
+
+### PhILR
+PhILR uses a phylogeny with no polytomies to construct a new set of variables corresponding to contrasts of sister clades descending from each of the nodes in the tree. Coordinates can be optionally weighted by the square root of the branch length separating the two sister clades. A complete ILR transform allows researchers to employ standard multivariate methods, and an ILR transform whose variables correspond to features in the tree may allow some evolutionary intepretation of results.
+
+Each PhILR coordinate cooresponds to the isometric log-ratio of sister clades descendant from a unique node in the phylogney. For a single PhILR coordinate to change and the rest to be unaffected, there must be a geometric increas in one clade matched by a geometric decrease in its sister clade, with the magnitude of the decrease depending on the size of each sister clade. Such changes could be of interest when searching for competitive interactions between close relatives, but the precise evolutionary and ecological assumptions under which such changes are likely to occur and be accurately identified has not been studied.
+
+Below, we create a PhILR transformed dataset.
+
+```{r PhILR transform, results='hide'}
+Y.philr <- philr(t(OTUTable),tree,return.all = TRUE)
+```
+
+Y.philr is a list containing the transformed data, `df.ilrp`, the sequential binary partition, `spb`, which corresponds exactly to the structure of the tree, the parts weighting, `p`, the basis whose columns are balancing elements, `V`, and the ILR weightings, `ilr.weights`.
+
+The mapping of nodes in the tree to ILR balances found in the columns of the dataset can be seen with the sequential binary partition:
+
+```{r sequential binary partition}
+colnames(Y.philr$df.ilrp) <- Ntip(tree)+1:Nnode(tree)
+colnames(Y.philr$sbp) <- Ntip(tree)+1:Nnode(tree)
+Y.philr$sbp
+```
+The first coordinate - the first column of the transformed data - corresponds to the root, node 11, which separates the tips `{t10,t6,t9}` from the rest. The second coordinate corresponds to node 12 separating `t10` from `{t6,t9}`, and so on. The sequential binary partition can be constructed by the sign of the basis matrix `V`, `sign(Y.philr$V)`.
+
+
+The isometric log-ratio transform is often motivated as a projection of centered-log-ratio transformed data onto a basis matrix, `V`. Even more simply, however, the isometric log-ratio transform can be calculated by projecting log-counts onto `V` (no need to center). Below, we illustrate that PhILR balances in `df.ilrp` can be obtained by projecting either clr-transformed data or log-count data onto `V`:
+
+```{r PhILR as projection of CLR transform}
+CLR.projection = t(Y.philr$V[,1,drop=F]) %*% Y.clr %>% t
+log.projection = t(Y.philr$V[,1,drop=F]) %*% log(OTUTable) %>% t
+
+comparison <- cbind(Y.philr$df.ilrp[,1],CLR.projection,log.projection)
+  rownames(comparison)=NULL
+  colnames(comparison)=c('PhILR','     V*CLR projection','  V*log(N) projection')
+comparison[1:6,]
+```
+
+Thus, the ILR transform is a way of analyzing log-transformed count data corresponding to contrasts between groups. The ILR transform yields a dataset that, under logistic-normality and log-normal assumptions (which, loosely speaking, are normality assumptions for compositional data), can be analyzed by standard, multivariate methods. PhILR creates an ILR transform where a coordinate corresponds to a (re-scaled) difference of log-counts of sister clades descending from a node in the tree. 
+
+Because we're interested in phylogenetic patterns of association with disturbance frequency, we will perform regression on the PhILR coordinates to see which nodes have a significant association with disturbance frequency. We perform multiple generalized linear models with `glm` and pull out the F-statistics and P-values from an F-test. The nodes with P<0.05 are:
+
+```{r Regression of PhILR balances}
+GLMs <- apply(Y.philr$df.ilrp,MARGIN=2,FUN=function(y,x) glm(y~x),x=disturbance_frequency)
+Fstatistics <- sapply(GLMs,FUN=function(GLM) summary(aov(GLM))[[1]][1,'F value'])
+Pvals <- sapply(GLMs,FUN=function(GLM) summary(aov(GLM))[[1]][1,'Pr(>F)'])
+which(Pvals< 0.05/(nspecies-1) ) %>% names #5% familiy-wide error rate
+```
+
+We can map these findings to the phylogeny by labelling nodes with their rounded F-statistics:
+```{r PhILR labelled heatmap}
+phylo.heatmap(tree,Y.clr)
+nodelabels(1:4,as.numeric(names(sort(Pvals)[1:4])))
+tiplabels(RNAcopyNumber$states)
+```
+
+The PhILR coordinate with the most significant association with disturbance frequency - the highest F statistic - corresponds to node 16, which separates `t1` from `{t2,t7}` with RNA copy numbers `{1}` and `{2,2}`, respectively. The second most significant PhILR variable corresponds to node 14, separating `{t5,t4,t8}` from `{t3,t7,t2,t1}`, with RNA copy numbers `{4,7,7}` and `{2,2,2,1}`, respectively. The third most significant PhILR coordinate corresponds to the root, splitting the tree into RNA copy numbers `{6,5,5}` and `{1,2,2,2,7,7,4}`. The fourth significant PhILR coordinate separates `t3` from `{t1,t2,t7}`, separating RNA copy numbers `{2}` from `{2,2,1}`,  which is likely significant due to the nested, descendant node - the most significant PhILR coordinate identified earlier, which better split OTUs based on RNA copy number. Using only sequence-count data and environmental meta-data, PhILR has identified nodes with sister clades containing different RNA copy numbers, the driving functional ecological trait in these data.
+
+PhILR transforms sequence-count data into real-valued log-ratios corresponding to contrasts of sister clades in each node of the phylogeny. PhILR is undefined for trees with polytomies and the coordinates, although orthogonal, are dependent under increases in one clade that do not come with a concomitant geometric decrease in its sister clade, causing a nested dependence observed here. Consequently, multiple hypothesis tests may lead to a high false-positive rate (see Washburne et al. 2017 for discussion of this nested dependence).
+
+### Phylogenetic factorization (phylofactor)
+
+Phylofactorization was built to correct for the nested dependence of nodes, the forced resolution of polytomies and the contrast of sister clades arising in an application of an ILR transform directly to a rooted phylogeny, as done in the unweighted PhILR transform. To do so, phylofactorization makes variables corresponding to edges in the tree. 
+
+Evolutionary leaps occur along edges in the phylogeny and can cause geometric changes in clades downstream of evolutionary leaps without opposing geometric changes in sister clades. Whereas PhILR constructs coordinates corresponding to sister clades, phylofactorization constructs ILR coordinates corresponding to groups separated by an edge. Phylofactorization can be interpreted as a form of factor analysis, where "factors" are latent variables corresponding to putative traits that arose along edges. If the dataset were tetrapods and not bacteria, PhILR would contain a coordinate on the ratio of birds to crocodiles, whereas phylofactorization could obtain a coordinate on the ratio of birds to non-avian tetrapods and thus have a variable corresponding to the ratio of organisms with and without wings (and feathers and other uniquely Avian traits).
+
+While the nodes of a resolved phylogeny define a single sequential binary partition for a rapid ILR transform, the edges do not and must be chosen iteratively to define a sequential binary partition. Phylofactorization is a greedy algorithm to identify edges in the phylogeny along which the sequentially most important evolutionary leaps occured, where "most important" is defined based on the research question. The default for the R package `phylofactor` is regression phylofactorization, where the "most important"" edges are those with the largest amount of variance explained from regression on the ILR variable constructed by contrasting the groups on each side of the edge.
+
+Phylofactorization can be implemented with the function `PhyloFactor`, which is wrapped around `glm` to allow flexible formulas, multiple regression and other regression-based objective functions. The defualt formula for regression is `Data~X`, which uses the independent variable - `X=disturbance_frequency` - to explain the ILR balances corresponding to each edge - `Data`. The default objective function is `choice='var'`, choosing which edge is "most important" based on which edge has the largest explained variance. For comparison with PhILR, we will select four factors.
+```{r Phylofactorization}
+PF <- PhyloFactor(Data=OTUTable,tree,X=disturbance_frequency,nfactors=4,ncores=2)
+names(PF)
+```
+Phylofactorization outputs a "phylofactor" class object, a list containing many objects useful for downstream prediction and visualization functions. The element `factors` is a summary of the factorization.
+
+```{r Factors}
+PF$factors
+```
+The first factor separates a 4-member Monophyletic clade from a 6-member "monophyletic" clade. Both clades are monophyletic because phylofactorization considers an unrooted tree, but the researcher can make further assumptions regarding monophyly. 
+
+The regression model from the first factor explains 32% of the total variance in the dataset. The F-statistics from regresion are displayed along with P-values from F-tests. The P-values from phylofactorization are based on an F-test and do not correct for multiple comparisons. The likelihood of seeing an explained variance as or more extreme than the one observed, given a phylofactorization of a multi-species tree, is not yet defined. Barring null simulation or conservative multiple-comparison corrections, phylofactorization, much like factor analysis, is a predominantly exploratory tool and further research on the null distribution of objective statistics is needed to make phylofactorization an accurate inferential tool (note: the same could be said of Principal Components Analysis - calculation of the null distribution of the percent variance explained by the first principal component lagged many years behind the development of the original method).
+
+The second factor separates a tip - one OTU - from a 3 member paraphyletic clade. By looking at the numbers of OTUs in each group, we can see that Group1 from factor 1 is split in factor 2. Later, Group2 in factor 1 - is split in factor 3. Finally, in factor 4, the 4-member clade in Group2 of factor 3 is split in half. Regression phylofactorization is also a form of hierarchical regression that constructs non-overlapping ILR coordinates that correct for previous inferences, and so the ILR balances for each factor will be log-ratios of Group1 and Group2 for each factor (NOT, for instance, the ratio of Group1 in factor 3 to all other OTUs in the community). The non-overlapping groups can be seen by looking at `PF$groups`.
+
+```{r Groups - factor 1}
+PF$groups$`factor 1` %>% lapply(.,FUN=function(g,tree) tree$tip.label[g],tree=tree)
+```
+```{r Groups - factor 2}
+PF$groups$`factor 2` %>% lapply(.,FUN=function(g,tree) tree$tip.label[g],tree=tree)
+```
+
+The second factor pulled out species `t1` from Group1 in factor 1. 
+
+`PhyloFactor` also returns a basis which corresponds to a sequential binary partition and can be used to generate ILR coordinates by projection of log-transformed data:
+
+```{r sequential binary partition & basis}
+sign(PF$basis) #sequential binary partition
+PF$basis       #basis V for projection of CLR coordinates
+```
+
+Phylogenetic "factors" correspond to edges in the phylogeny, and both edges and down-stream nodes corresponding to each factor can be obtained using the functions `getFactoredEdges` (or `getFactoredEdgesPAR`, which speeds up compuation for large trees and many factors).
+```{r}
+factored.edges <- PF$basis %>% apply(.,MARGIN=2,FUN=getFactoredEdges,tree=tree) %>% unlist
+factored.nodes <- tree$edge[factored.edges,2]
+```
+
+
+Regression phylofactorization allows for low-rank predictions of the data, which can be visualized alongside the original data
+```{r Visualizing Phylofactorization}
+par(mfrow=c(2,1))
+phylo.heatmap(tree,Y.clr,main='Original Data')
+tiplabels(RNAcopyNumber$states)
+
+PFhat <- pf.predict(PF)  # phylofactor's predictions of the OTU relative abundances
+PF.clr <- apply(PFhat,MARGIN=2,clr) # CLR-transformed PF predictions
+
+phylo.heatmap(tree,PF.clr,main='Phylfactorization Predictions')
+edgelabels(1:4,factored.edges)
+```
+
+With four edges, Phylofactorization recreates the visible blocks in the dataset. 
+
+An important concept from phylofactorization is the "binned phylogenetic units", or BPUs, contained in the `bins` element. Phylofactorization splits the tree along edges, and each split forms two groups. At the end of `n` factors, there will be `n+1` groups, referred to as "bins". 
+
+```{r}
+PF$bins %>% lapply(.,FUN=function(G,tree) tree$tip.label[G],tree=tree)
+```
+
+Phylofactorization has used only OTU abundances and environmental meta-data to pull out bins of OTUs with common evolutionary history and meta-data associations. Phylofactorization was developed to generate the hypothesis that resulting bins share a common, latent variable - a trait arising along the factored edge - driving habitat associations. The RNA copy numbers (the latent variable) in each bin are:
+
+```{r}
+PF$bins %>% lapply(.,FUN=function(G,tree) tree$tip.label[G],tree=tree) %>% 
+            lapply(.,FUN=function(G,states) states[G],states=RNAcopyNumber$states)
+```
+
+### Mapping PhyloFactor and PhILR to Trait Evolution
+
+PhILR and PhyloFactor both create ILR transforms, but the variables in the former correspond to nodes while the latter correspond edges. The correspondence of nodes identified in PhILR and edges identified in phylofactorization to simulated trait evolution can be visualized on the phylogeny showing simulated RNA copy number evolution:
+
+```{r plot factors and PhILR nodes on Simmap}
+layout(c(1,1,1,2))
+plotSimmap(RNAcopyNumber)
+edgelabels(1:3,factored.edges,cex=2,bg='green')
+tiplabels(RNAcopyNumber$states,cex=2,bg='white',adj = -1.5)
+philr.top.4 <- as.numeric(names(sort(Fstatistics,decreasing = T)))[1:4]
+nodelabels(1:4,philr.top.4,cex=2,bg='blue',col = 'yellow')
+plot.new()
+legend('center',legend=c('PhyloFactors','PhILR signif. nodes','RNA Copy Number'),fill=c('green','blue','white'))
+```
+
+Both PhILR and PhyloFactor correctly identified sites in the phylogeny corresponding to evolutionary events. Both identify groups of taxa with different associations with disturbance frequency. We'll use the notation `{R|S}` to refer to a split between groups `R` and `S` in a given ILR coordinate.  
+
+The dominant PhILR coordinate identified the node separating `{t1|t2,t7}`, which separated OTUs with RNA copy numbers {1|2,2}. An evolutionary interpretation of a significant PhILR coordinate is that a mutation arose in one of the downstream edges, which is correct. The second dominant PhILR coordinate separates groups `{t1,t2,t7,t3|t8,t4,t5}` with RNA copy numbers `{1,2,2,2|7,7,4}`, and indeed the downstream edges of this node contained mutations pushing RNA copy number in opposite directions in the two sister clades. The third, dominant node is the root, separating `{t1,t2,t7,t3,t8,t4,t5|t10,t6,t5}` with copy numbers `{1,2,2,2,7,7,5|6,5,5}`. The fourth and final significant PhILR coordinate separated `{t1,t2,t7|t3}` with copy numbers `{1,2,2|2}`. 
+
+The first PhyloFactor identified an edge in which RNA copy number mutated from 4-->3-->2 copies, separating OTUS `{t10,t6,t9,t5,t4,t8|t1,t2,t3,t7}`, with RNA copy numbers `{6,5,5,4,7,7|1,2,2,2}`. The second phylofactor separated the group `{t1|t2,t3,t7}`, with RNA copy numbers `{1|2,2,2}`. Historically, a mutation did not occur along this edge - RNA copy number mutated from 2-->1 prior to the second factored edge, and then from 1-->2 in the sister edge. Such evolutionary history would be challenging to detect barring detailed historical data - ancestral state reconstructions of contemporary traits would likely identify the phylofactored edge as the edge containing a mutation. The third factor separates the group `{t10,t6,t9,t5|t4,t8}` with RNA copy numbers `{6,5,5,4|7,7}`. 
+
+Both methods can connect sequence-count data analysis to genomic studies investigating likely functional ecological traits driving patterns in abundance, but the methods differ in which groups - sister clades, or clades separated by an edge controlling for previously identified edges - they would recommend comparing in a genomic study. While phylofactorization sequentially splits existing bins of OTUs.
+
+### Summary - phylogenetic variables analysis
+
+The phylogeny can be used to define new variables, most easily by aggregating features of clades and contrasting features between clades. PhILR and phylofactorization are two recently developed methods for constructing and analyzing different phylogenetic variables corresponding to contrasts of groups. The two methods illustrate the nuances to be considered in PVA, from nested dependence to the biological interpretation and correspondence to ecological and evolutionary models.
+
+Phylogenetic variables will likely differ in their ability to identify different evolutionary and ecological processes at play. PhILR, which contrasts sister clades, can identify nodes attached to two edges along which functional traits may have arisen and the contrast of close relatives could be ideal for identifying competitive dynamics between sister clades. PhyloFactor, which identifies clades with both common ancestry through particular edges and common patterns of abundance, is more specialized for identifying precise locations of the emergence of functional traits which cause geometric increases or decreases within the clade without concomitant effects on sister clades. If analyzing vertebrate abundances in air, PhILR would presumably identify birds for comparison with crocodiles, whereas PhyloFactor would identify birds for comparison with non-birds. 
+
+Due to the novelty of these methods and the unfamiliarity of the isometric log-ratio transform, we have focused this section of the tutorial on reviewing the construction, analysis, and interpretation of these new phylogenetic variables. We leave their sensitivity to horizontal gene transfer to primary literature, investigations, sensitivity analyses which we strongly recommend given the sensitivty of well-developed phylogenetic comparative methods to HGT. Both PhILR and PhyloFactor warrant further investigation to better understand their sensitivity and limitations, including the sensitivity to treatment of zeros, the effect of nested dependence of nodes in PhILR and factors when cross-validating edges from PhyloFactor, the null distribution of test-statistics (correlated test-statistics in PhILR due to nested dependence of nodes and biased test-statistics of PhyloFactor due to selection of edges maximizing objective functions often positively related to test-statistics), and more. Finally, it's possible to weight findings by branch length - both phylofactored edges and PhILR nodes can be weighted by the lenghts of nearby branches (such a weighting scheme - by the square root of downstream branch lengths - was included ad hoc in PhILR), and the robustness and accuracy of both methods with and without branch-length weights under various evolutionary models should be carefully investigated. 
+
+There are many other phylogenetic variables that have been and can be constructed, including diversity metrics, taxonomic aggregations, the edge-contrasts underlying edge PCA (the difference in relative abundance across each edge in the phylogeny), contrasts between distant clades based on additional meta-data, and more.
+
+We follow Felsenstein et al. (2011) and recomend new methods be evaluated in the context of clear evolutionary and ecological mechanisms. New variables can be constructed easily as a stastistical fix, but developing new variables with a mechanism in mind can allow researchers to identify the ability and, crucially, the limits of different variables to identify different evolutionary and ecological effects. New methods for phylogenetic variable analysis are well motivated when they can identify ecological and evolutionary mechanisms not yet identifiable with existing methods, better identify existing mechanisms compared to existing methods, produce biological interpretabile results, and/or carry clear down-stream biological implications (such as various diversity-stability relationships).
