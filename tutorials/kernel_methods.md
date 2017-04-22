@@ -7,7 +7,7 @@ One of the most commonly used distance metrics used in microbial ecology is [Uni
 
 To illustrate how Unifrac works, consider the following example
 
-![png](unifrac.jpg)
+![png](images/unifrac.jpg)
 
 Here, there are three samples that contain microbial communities made up 9 different species. None of the communities have any species in common, but we can see that the species between Sample 1 and Sample 2 are more similar compared to the species between Sample 1 and Sample 3.  This is because the species between Sample 1 and Sample 2 share a common ancestor that is more recent than Sample 3.  
 
@@ -87,7 +87,7 @@ wu_dm
 
 
 
-![svg](output_8_0.svg)
+![svg](images/output_8_0.svg)
 
 
 
@@ -104,7 +104,7 @@ bc_dm
 
 
 
-![svg](output_10_0.svg)
+![svg](images/output_10_0.svg)
 
 
 
@@ -127,7 +127,7 @@ pc.plot(samp_md, 'Disturbance_Frequency',
 
 
 
-![png](output_13_0.png)
+![png](images/output_13_0.png)
 
 
 
